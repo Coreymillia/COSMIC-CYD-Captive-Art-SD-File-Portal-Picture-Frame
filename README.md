@@ -151,7 +151,7 @@ Requires [PlatformIO](https://platformio.org/). All dependencies are pulled auto
 ---
 
 ## Notes
-
+- IMPORTANT NOTE! This is an OPEN portal. The way the file transfer should work is the FIRST person to connect can transfer files. Anyone else who connects (if anyone) then the files should be locked out from anyone else. Meaning. You will want to be the first one to connect. IF you are worried about someone connecting before you OR in general you should NOT put images or files on the SD card that are sensitive!!! STRANGERS WILL be able to download your files if you are not using the portal with your card inserted!!!!
 - No internet connection is ever made. The portal is fully self-contained on the device.
 - Visitor count is stored in NVS flash and survives power cycles.
 - The portal HTML, CSS, and all art animations live in flash. The SD card is only for user files.
