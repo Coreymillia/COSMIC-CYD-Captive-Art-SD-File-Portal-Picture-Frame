@@ -98,6 +98,11 @@ static uint8_t      ledColorStep  = 0;
 static unsigned long ledColorLast = 0;
 static bool         menuOpen         = false;
 static unsigned long lastTouchMs     = 0;
+// ── Trivia game state ─────────────────────────────────────────────────────────
+static bool    triviaActive = false;
+static uint8_t triviaQ      = 0;   // current question index (0-24)
+static uint8_t triviaScore  = 0;
+static bool    triviaDisplayDirty = false;
 static unsigned long menuFeedbackUntil = 0;
 
 // ── Message system (visitor ↔ portal) ─────────────────────────────────────────
@@ -180,6 +185,11 @@ footer{margin-top:16px;font-size:.4rem;letter-spacing:4px;color:rgba(255,255,255
     <span class="icon">&#x1F5BC;</span>
     <span class="name n5">SCREENSAVER</span>
     <span class="desc">SET DISPLAY IMAGE</span>
+  </a>
+  <a class="card" style="background:rgba(20,0,60,.7);border:1px solid rgba(199,119,255,.55)" href="/trivia">
+    <span class="icon">&#x1F30C;</span>
+    <span class="name" style="color:#c77dff">COSMIC TRIVIA</span>
+    <span class="desc">25 QUESTIONS &middot; TEST THE UNIVERSE</span>
   </a>
   <a class="card" style="background:rgba(131,56,236,.12);border:1px solid rgba(131,56,236,.35)" href="/gallery/settings">
     <span class="icon">&#x1F512;</span>
@@ -5239,6 +5249,251 @@ void handleGallerySetPass() {
     }
 }
 
+// ── Cosmic Trivia Game ────────────────────────────────────────────────────────
+struct TriviaQuestion { const char* q; const char* o[4]; uint8_t a; };
+static const TriviaQuestion TRIVIA[25] = {
+  {"What % of the universe is ordinary matter?",
+   {"5%","27%","68%","95%"}, 0},
+  {"How many stars are estimated in the observable universe?",
+   {"7 billion","100 trillion","1 septillion","1 quintillion"}, 2},
+  {"How long does sunlight take to reach Earth?",
+   {"8 seconds","8 minutes","8 hours","8 days"}, 1},
+  {"What surrounds a black hole where nothing can escape?",
+   {"Singularity","Photon sphere","Event horizon","Corona"}, 2},
+  {"The 'Hard Problem of Consciousness' was coined by...",
+   {"Carl Sagan","David Chalmers","Michio Kaku","Alan Watts"}, 1},
+  {"How many atoms are estimated in the observable universe?",
+   {"10^50","10^60","10^78","10^80"}, 3},
+  {"What supercluster contains our Milky Way?",
+   {"Virgo Cluster","Perseus Wall","Laniakea","Coma Cluster"}, 2},
+  {"The Big Bang occurred approximately...",
+   {"4.5 billion yrs ago","7 billion yrs ago","13.8 billion yrs ago","20 billion yrs ago"}, 2},
+  {"Quantum entanglement is sometimes called...",
+   {"Ghost coupling","Spooky action at a distance","Void resonance","Dark linking"}, 1},
+  {"How many stars does the Milky Way contain?",
+   {"1 billion","100-400 billion","1 trillion","10 trillion"}, 1},
+  {"What fraction of the universe is dark energy?",
+   {"~5%","~27%","~68%","~90%"}, 2},
+  {"Vibrating energy strings describe which theory?",
+   {"Loop Quantum Gravity","M-Theory","String Theory","Wave mechanics"}, 2},
+  {"A teaspoon of neutron star weighs approximately...",
+   {"1 million tons","1 billion tons","1 trillion tons","10 tons"}, 1},
+  {"The Fermi Paradox asks why...",
+   {"Light bends near mass","Aliens are silent despite probability","Quantum tunneling works","Black holes radiate"}, 1},
+  {"The Anthropic Principle suggests universal constants are...",
+   {"Random accidents","Fine-tuned for observers to exist","Proof of a creator","Mathematically perfect"}, 1},
+  {"'Cosmic inflation' refers to...",
+   {"Universe expanding today","Rapid expansion right after Big Bang","Star formation rate","Dark energy growth"}, 1},
+  {"The holographic principle suggests our 3D reality may be...",
+   {"A dream","A simulation","A 2D surface projection","Inside a black hole"}, 2},
+  {"M-Theory proposes how many dimensions?",
+   {"4","7","11","26"}, 2},
+  {"The 'observer effect' in quantum mechanics means...",
+   {"Observers rewrite history","Measurement affects quantum state","Consciousness creates matter","Light changes color when watched"}, 1},
+  {"The 'Many-Worlds' interpretation of QM suggests...",
+   {"All outcomes branch into parallel universes","Particles exist everywhere","Stars have inner worlds","Dimensions overlap"}, 0},
+  {"A light-year is a measure of...",
+   {"Time","Speed","Distance","Brightness"}, 2},
+  {"Tesla: 'The secrets of the universe lie in terms of...'",
+   {"Matter, mass, motion","Energy, frequency, vibration","Space, time, gravity","Light, shadow, reflection"}, 1},
+  {"The Cosmic Microwave Background is...",
+   {"X-ray glow from black holes","Afterglow radiation from the Big Bang","Nebula light","Pulsar emissions"}, 1},
+  {"Our Sun is classified as a...",
+   {"Red dwarf","Blue giant","Yellow dwarf","White dwarf"}, 2},
+  {"What % of your body's atoms were forged in ancient stars?",
+   {"About 10%","About 50%","About 75%","Nearly 100%"}, 3},
+};
+
+static const char* triviaRating(uint8_t s) {
+    if (s == 25) return "COSMIC ORACLE \xF0\x9F\x92\x8E \xe2\x80\x94 You ARE the universe, fully awakened.";
+    if (s >= 21) return "GALACTIC SAGE \xF0\x9F\x94\xae \xe2\x80\x94 The cosmos flows through you.";
+    if (s >= 16) return "QUANTUM ADEPT \xe2\x9c\xa8 \xe2\x80\x94 You feel the fabric of spacetime!";
+    if (s >= 11) return "NEBULA NAVIGATOR \xF0\x9F\x8C\x8C \xe2\x80\x94 The cosmos is calling you deeper.";
+    if (s >=  6) return "STARDUST SEEKER \xe2\xad\x90 \xe2\x80\x94 You're made of stars, learn their names!";
+    return           "COSMIC INFANT \xF0\x9F\x8C\x91 \xe2\x80\x94 The universe is vast, keep exploring!";
+}
+
+static const char TRIVIA_CSS[] =
+    "*{margin:0;padding:0;box-sizing:border-box}"
+    "body{background:radial-gradient(ellipse at 50% 50%,#0d003d,#000010 70%);"
+    "min-height:100vh;display:flex;flex-direction:column;align-items:center;"
+    "font-family:'Courier New',monospace;color:#fff;padding:24px 16px}"
+    "nav a{font-size:.5rem;letter-spacing:4px;color:rgba(199,119,255,.55);"
+    "text-decoration:none;padding:5px 10px;border:1px solid rgba(199,119,255,.25);border-radius:6px}"
+    "h1{font-size:1.1rem;letter-spacing:6px;text-align:center;margin:18px 0 4px;"
+    "background:linear-gradient(90deg,#c77dff,#8338ec,#c77dff);"
+    "-webkit-background-clip:text;-webkit-text-fill-color:transparent}"
+    ".sub{font-size:.42rem;letter-spacing:6px;color:rgba(199,119,255,.35);margin-bottom:20px;text-align:center}"
+    ".box{width:min(420px,94vw);background:rgba(20,0,40,.75);"
+    "border:1px solid rgba(131,56,236,.4);border-radius:12px;padding:22px;margin-bottom:14px}"
+    ".q{font-size:.65rem;letter-spacing:2px;line-height:1.6;color:#e0d0ff;margin-bottom:18px}"
+    ".opt{display:block;width:100%;padding:12px;margin-top:10px;text-align:left;"
+    "background:rgba(131,56,236,.15);border:1px solid rgba(131,56,236,.5);"
+    "border-radius:8px;color:#c77dff;font-family:'Courier New',monospace;"
+    "font-size:.52rem;letter-spacing:2px;cursor:pointer;text-decoration:none}"
+    ".opt:active{background:rgba(131,56,236,.5)}"
+    ".correct{background:rgba(0,180,80,.25);border-color:#00e060;color:#00ff88}"
+    ".wrong{background:rgba(180,0,0,.25);border-color:#ff3030;color:#ff6060}"
+    ".prog{width:100%;height:6px;background:rgba(255,255,255,.08);border-radius:3px;margin-bottom:16px}"
+    ".progfill{height:6px;background:linear-gradient(90deg,#8338ec,#c77dff);border-radius:3px}"
+    ".score{font-size:.5rem;letter-spacing:4px;color:rgba(199,119,255,.5);text-align:right;margin-bottom:8px}"
+    ".big{font-size:1.8rem;text-align:center;margin:10px 0}"
+    ".rating{font-size:.55rem;letter-spacing:2px;color:#c77dff;text-align:center;margin:8px 0 16px;line-height:1.6}"
+    ".btn{display:block;width:100%;padding:13px;margin-top:12px;"
+    "background:rgba(131,56,236,.25);border:1px solid rgba(131,56,236,.6);"
+    "border-radius:8px;color:#c77dff;font-family:'Courier New',monospace;"
+    "font-size:.55rem;letter-spacing:4px;cursor:pointer;text-align:center;text-decoration:none}";
+
+void handleTrivia() {
+    triviaActive = false;
+    triviaDisplayDirty = true;
+    String html = F("<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>COSMIC TRIVIA</title><style>");
+    html += TRIVIA_CSS;
+    html += F("</style></head><body>"
+        "<nav><a href='/'>&#x2190; BACK</a></nav>"
+        "<h1>COSMIC TRIVIA</h1><p class='sub'>25 QUESTIONS \xc2\xb7 TEST YOUR UNIVERSAL KNOWLEDGE</p>"
+        "<div class='box'>"
+        "<p class='q'>How well do you know the cosmos? From quantum mechanics to the nature of consciousness \xe2\x80\x94 "
+        "25 questions await. The universe is watching.</p>"
+        "<a href='/trivia/play?q=0&s=0' class='btn'>&#x1F30C; BEGIN TRANSMISSION</a>"
+        "</div></body></html>");
+    server.send(200, "text/html", html);
+}
+
+void handleTriviaPlay() {
+    int q = server.arg("q").toInt();
+    int s = server.arg("s").toInt();
+    if (q < 0 || q >= 25) q = 0;
+    if (s < 0 || s > 25)  s = 0;
+    triviaActive = true;
+    triviaQ      = (uint8_t)q;
+    triviaScore  = (uint8_t)s;
+    triviaDisplayDirty = true;
+
+    const TriviaQuestion& tq = TRIVIA[q];
+    String html = F("<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>COSMIC TRIVIA</title><style>");
+    html += TRIVIA_CSS;
+    html += F("</style></head><body>"
+        "<nav><a href='/trivia'>&#x2190; QUIT</a></nav>"
+        "<h1>COSMIC TRIVIA</h1><p class='sub'>QUESTION ");
+    html += (q + 1);
+    html += F(" OF 25</p><div class='box'>");
+    // progress bar
+    html += F("<div class='prog'><div class='progfill' style='width:");
+    html += (int)((q * 100) / 25);
+    html += F("%'></div></div>");
+    html += F("<div class='score'>SCORE: ");
+    html += s;
+    html += F(" / ");
+    html += q;
+    html += F("</div><p class='q'>");
+    html += tq.q;
+    html += F("</p>");
+    for (uint8_t i = 0; i < 4; i++) {
+        html += F("<a class='opt' href='/trivia/answer?q=");
+        html += q;
+        html += F("&s=");
+        html += s;
+        html += F("&a=");
+        html += i;
+        html += F("'>");
+        html += (char)('A' + i);
+        html += F(". ");
+        html += tq.o[i];
+        html += F("</a>");
+    }
+    html += F("</div></body></html>");
+    server.send(200, "text/html", html);
+}
+
+void handleTriviaAnswer() {
+    int q = server.arg("q").toInt();
+    int s = server.arg("s").toInt();
+    int a = server.arg("a").toInt();
+    if (q < 0 || q >= 25) q = 0;
+    if (s < 0 || s > 25)  s = 0;
+    if (a < 0 || a > 3)   a = 0;
+
+    const TriviaQuestion& tq = TRIVIA[q];
+    bool correct = (a == (int)tq.a);
+    int  newS    = s + (correct ? 1 : 0);
+    int  nextQ   = q + 1;
+
+    // Update CYD
+    triviaScore = (uint8_t)newS;
+    triviaDisplayDirty = true;
+
+    // Show answer feedback page
+    String html = F("<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>COSMIC TRIVIA</title><style>");
+    html += TRIVIA_CSS;
+    // auto-advance after 2 s
+    html += F("</style><script>setTimeout(()=>{location.href='");
+    if (nextQ >= 25) {
+        html += "/trivia/results?s=";
+        html += newS;
+    } else {
+        html += "/trivia/play?q=";
+        html += nextQ;
+        html += "&s=";
+        html += newS;
+    }
+    html += F("'},2000);</script></head><body>"
+        "<nav><a href='/trivia'>&#x2190; QUIT</a></nav>"
+        "<h1>COSMIC TRIVIA</h1><p class='sub'>QUESTION ");
+    html += (q + 1);
+    html += F(" OF 25</p><div class='box'><p class='q'>");
+    html += tq.q;
+    html += F("</p>");
+    for (uint8_t i = 0; i < 4; i++) {
+        html += F("<span class='opt ");
+        if ((int)i == (int)tq.a) html += F("correct");
+        else if ((int)i == a)    html += F("wrong");
+        html += F("'>");
+        html += (char)('A' + i);
+        html += F(". ");
+        html += tq.o[i];
+        if ((int)i == (int)tq.a) html += F(" \xe2\x9c\x94");
+        else if ((int)i == a)    html += F(" \xe2\x9c\x98");
+        html += F("</span>");
+    }
+    html += F("<p style='text-align:center;margin-top:16px;font-size:.5rem;color:rgba(199,119,255,.4)'>"
+              "AUTO-ADVANCING\xe2\x80\xa6</p></div></body></html>");
+    server.send(200, "text/html", html);
+}
+
+void handleTriviaResults() {
+    int s = server.arg("s").toInt();
+    if (s < 0 || s > 25) s = 0;
+    triviaActive = false;
+    triviaScore  = (uint8_t)s;
+    triviaDisplayDirty = true;
+
+    String html = F("<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>COSMIC TRIVIA</title><style>");
+    html += TRIVIA_CSS;
+    html += F("</style></head><body>"
+        "<nav><a href='/trivia'>&#x2190; PLAY AGAIN</a></nav>"
+        "<h1>COSMIC TRIVIA</h1><p class='sub'>TRANSMISSION COMPLETE</p>"
+        "<div class='box'><p class='big'>");
+    html += s;
+    html += F(" / 25</p><p class='rating'>");
+    html += triviaRating((uint8_t)s);
+    html += F("</p><div class='prog'><div class='progfill' style='width:");
+    html += (s * 100) / 25;
+    html += F("%'></div></div>"
+              "<a href='/trivia/play?q=0&s=0' class='btn'>&#x1F501; PLAY AGAIN</a>"
+              "<a href='/' class='btn' style='margin-top:8px'>&#x2B21; EXPLORE MODES</a>"
+              "</div></body></html>");
+    server.send(200, "text/html", html);
+}
+
 // ── JPEG screensaver image display ────────────────────────────────────────────
 static JPEGDEC   ssJpeg;
 static File      ssJpegFile;
@@ -6073,6 +6328,45 @@ static void updateDisplay() {
         gfx->fillScreen(0x0000);
     }
 
+    // ── Trivia game display ───────────────────────────────────────────────────
+    if (triviaActive && triviaDisplayDirty) {
+        triviaDisplayDirty = false;
+        gfx->fillScreen(0x0000);
+        uint16_t hdr = gfx->color565(131, 56, 236);
+        gfx->setTextColor(hdr);
+        gfx->setTextSize(2);
+        gfx->setCursor(22, 16);
+        gfx->print("COSMIC TRIVIA");
+        // Progress bar
+        int barFill = (triviaQ * 298) / 25;
+        gfx->drawRect(11, 50, 298, 10, gfx->color565(60, 20, 100));
+        gfx->fillRect(11, 50, barFill, 10, hdr);
+        // Q and score
+        gfx->setTextColor(0x07FF); // cyan
+        gfx->setTextSize(2);
+        char tbuf[32];
+        snprintf(tbuf, sizeof(tbuf), "Q %d / 25", triviaQ + 1);
+        gfx->setCursor(20, 80);
+        gfx->print(tbuf);
+        snprintf(tbuf, sizeof(tbuf), "SCORE: %d", triviaScore);
+        gfx->setTextColor(0x07E0); // green
+        gfx->setCursor(20, 108);
+        gfx->print(tbuf);
+        // Stars row decorative
+        gfx->setTextColor(gfx->color565(80, 40, 140));
+        gfx->setTextSize(1);
+        gfx->setCursor(20, 150);
+        gfx->print("* * * * * * * * * * * * * * * * *");
+        gfx->setTextColor(gfx->color565(100, 60, 160));
+        gfx->setCursor(20, 165);
+        gfx->print("PLAYER CONNECTED");
+        return;
+    }
+    if (!triviaActive && triviaDisplayDirty) {
+        triviaDisplayDirty = false;
+        gfx->fillScreen(0x0000); // force idle panel redraw
+    }
+
     // ── Normal idle panel ─────────────────────────────────────────────────────
     // Hold while menu or sent-feedback is showing
     if (menuOpen) return;
@@ -6306,6 +6600,10 @@ void setup() {
     server.on("/screensaver/clear",HTTP_GET,  handleSsaverClear);
     server.on("/screensaver/pick", HTTP_GET,  handleSsaverPick);
     // API
+    server.on("/trivia",         HTTP_GET,  handleTrivia);
+    server.on("/trivia/play",    HTTP_GET,  handleTriviaPlay);
+    server.on("/trivia/answer",  HTTP_GET,  handleTriviaAnswer);
+    server.on("/trivia/results", HTTP_GET,  handleTriviaResults);
     server.on("/api/msg",          HTTP_GET,  handleApiMsg);
     server.on("/api/visitor-msg",  HTTP_POST, handleApiVisitorMsg);
     server.on("/favicon.ico", HTTP_GET, []() { server.send(404, "text/plain", ""); });
