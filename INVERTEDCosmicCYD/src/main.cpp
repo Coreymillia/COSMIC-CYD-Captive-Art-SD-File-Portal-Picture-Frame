@@ -88,8 +88,12 @@ static unsigned long lastDispUpdate  = 0;
 static unsigned long flashUntil      = 0;   // ms timestamp until flash effect ends
 static uint16_t     idleHue          = 0;
 static bool         inScreensaver     = false;
-static bool         ssaverImageActive = false;  // true when /ssaver.jpg on SD
-static bool         ssaverImageShown  = false;  // true after image decoded once
+// 0=matrix, 1=starfield, 2=plasma, 3=image(picked/uploaded), 4=sdcycle
+static uint8_t      ssaverMode       = 0;
+static bool         ssaverImageShown = false;
+static uint16_t     sdCycleMins      = 5;      // 1,5,15,30
+static unsigned long sdCycleLast     = 0;
+static int          sdCycleIdx       = 0;
 static bool         menuOpen         = false;
 static unsigned long lastTouchMs     = 0;
 static unsigned long menuFeedbackUntil = 0;
@@ -5234,6 +5238,15 @@ void handleGallerySetPass() {
 }
 
 // ── JPEG screensaver image display ────────────────────────────────────────────
+
+// Forward declarations for screensaver helpers defined later in this file
+static bool  mxReady = false;
+static bool  sfReady = false;
+static float plT     = 0.0f;
+static void mxStart();
+static void drawMatrixFrame();
+
+
 static JPEGDEC   ssJpeg;
 static File      ssJpegFile;
 
@@ -5272,10 +5285,53 @@ static void showSsaverImage() {
     ssJpeg.close();
 }
 
+static void sdCycleAdvance() {
+    if (!sdReady) { if (!mxReady) mxStart(); drawMatrixFrame(); return; }
+    std::vector<String> imgs;
+    File root = SD.open("/");
+    if (root) {
+        File f = root.openNextFile();
+        while (f) {
+            if (!f.isDirectory()) {
+                String n = String(f.name());
+                if (n.startsWith("/")) n = n.substring(1);
+                if (isImageFile(n) && n != "ssaver.jpg" && n != "sdpass.txt") imgs.push_back(n);
+            }
+            f = root.openNextFile();
+        }
+        root.close();
+    }
+    if (imgs.empty()) { if (!mxReady) mxStart(); drawMatrixFrame(); return; }
+    sdCycleIdx = sdCycleIdx % (int)imgs.size();
+    String path = "/" + imgs[sdCycleIdx];
+    ssJpegFile = SD.open(path);
+    if (ssJpegFile) {
+        int32_t fsize = ssJpegFile.size();
+        if (ssJpeg.open((void*)&ssJpegFile, fsize, ssJpegClose, ssJpegRead, ssJpegSeek, ssJpegDraw)) {
+            int imgW = ssJpeg.getWidth(), imgH = ssJpeg.getHeight();
+            int scaleOpt = JPEG_SCALE_EIGHTH; int div = 8;
+            if (imgW/1 <= 320 && imgH/1 <= 240)       { scaleOpt = 0;                    div = 1; }
+            else if (imgW/2 <= 320 && imgH/2 <= 240)  { scaleOpt = JPEG_SCALE_HALF;    div = 2; }
+            else if (imgW/4 <= 320 && imgH/4 <= 240)  { scaleOpt = JPEG_SCALE_QUARTER; div = 4; }
+            int sw = imgW/div, sh = imgH/div;
+            int xOff = (sw<=320)?(320-sw)/2:-((sw-320)/2);
+            int yOff = (sh<=240)?(240-sh)/2:-((sh-240)/2);
+            gfx->fillScreen(0x0000);
+            ssJpeg.setPixelType(RGB565_BIG_ENDIAN);
+            ssJpeg.decode(xOff, yOff, scaleOpt);
+            ssJpeg.close();
+        } else { ssJpegFile.close(); }
+    }
+    sdCycleIdx = (sdCycleIdx + 1) % (int)imgs.size();
+    sdCycleLast = millis();
+    ssaverImageShown = true;
+}
+
 // ── /screensaver ──────────────────────────────────────────────────────────────
 static File ssaverUploadFile;
 
 void handleSsaverGet() {
+    static const char* modeNames[] = {"MATRIX RAIN","STARFIELD","PLASMA WAVES","SINGLE IMAGE","SD SHUFFLE"};
     String html = F("<!DOCTYPE html><html><head><meta charset='UTF-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<title>SCREENSAVER</title><style>"
@@ -5293,34 +5349,88 @@ void handleSsaverGet() {
         "border:1px solid rgba(131,56,236,.4);border-radius:12px;padding:22px;margin-bottom:16px}"
         ".lbl{font-size:.45rem;letter-spacing:4px;color:rgba(199,119,255,.6);display:block;margin-bottom:10px}"
         ".active{font-size:.55rem;letter-spacing:3px;color:#c77dff;display:block;margin-bottom:14px}"
-        ".btn{display:block;width:100%;padding:11px;margin-top:14px;"
+        ".btn{display:block;width:100%;padding:11px;margin-top:10px;"
         "background:rgba(131,56,236,.18);border:1px solid rgba(131,56,236,.6);"
         "border-radius:8px;color:#c77dff;font-family:'Courier New',monospace;"
         "font-size:.52rem;letter-spacing:3px;cursor:pointer;text-align:center;text-decoration:none}"
-        ".btn:active{background:rgba(131,56,236,.4)}"
+        ".btn:active,.btn.sel{background:rgba(131,56,236,.5);border-color:#c77dff}"
         ".clr{background:rgba(80,0,0,.45);border-color:rgba(255,50,50,.5);color:rgba(255,100,100,.8)}"
         "input[type=file]{width:100%;padding:8px 4px;background:rgba(0,0,0,.4);"
         "border:1px solid rgba(131,56,236,.4);border-radius:6px;color:#c77dff;"
         "font-family:'Courier New',monospace;font-size:.48rem}"
+        "select{width:100%;padding:9px;margin-top:10px;background:rgba(0,0,0,.5);"
+        "border:1px solid rgba(131,56,236,.5);border-radius:8px;color:#c77dff;"
+        "font-family:'Courier New',monospace;font-size:.5rem}"
         ".hint{font-size:.38rem;letter-spacing:2px;color:rgba(255,255,255,.2);margin-top:10px;text-align:center}"
         "</style></head><body>"
         "<nav><a href='/'>&#x2190; BACK</a></nav>"
-        "<h1>SCREENSAVER</h1><p class='sub'>CYD DISPLAY IMAGE</p>");
-    if (ssaverImageActive) {
-        html += F("<div class='box'><span class='lbl'>CURRENT STATUS</span>"
-                  "<span class='active'>&#x2714; IMAGE ACTIVE</span>"
+        "<h1>SCREENSAVER</h1><p class='sub'>CYD DISPLAY MODES</p>");
+
+    // Mode selector
+    html += F("<div class='box'><span class='lbl'>SELECT MODE</span>"
+              "<form method='GET' action='/screensaver/setmode'>");
+    const char* modeIcons[] = {"&#x1F4A7;","&#x2728;","&#x1F308;","&#x1F5BC;","&#x1F500;"};
+    for (uint8_t m = 0; m <= 4; m++) {
+        html += "<button type='submit' name='mode' value='";
+        html += m;
+        html += "' class='btn";
+        if (ssaverMode == m) html += " sel";
+        html += "'>";
+        html += modeIcons[m];
+        html += " ";
+        html += modeNames[m];
+        html += "</button>";
+    }
+    // cycle interval select (only relevant for SD SHUFFLE)
+    html += F("<span class='lbl' style='margin-top:16px'>SD SHUFFLE SPEED</span>"
+              "<select name='cycle'>"
+              "<option value='1'");
+    if (sdCycleMins==1)  html += F(" selected");
+    html += F(">1 MINUTE</option><option value='5'");
+    if (sdCycleMins==5)  html += F(" selected");
+    html += F(">5 MINUTES</option><option value='15'");
+    if (sdCycleMins==15) html += F(" selected");
+    html += F(">15 MINUTES</option><option value='30'");
+    if (sdCycleMins==30) html += F(" selected");
+    html += F(">30 MINUTES</option></select>"
+              "</form></div>");
+
+    // Show SINGLE IMAGE options only when in image mode
+    if (ssaverMode == 3) {
+        html += F("<div class='box'><span class='lbl'>CURRENT IMAGE</span>"
+                  "<span class='active'>&#x2714; SINGLE IMAGE ACTIVE</span>"
                   "<a href='/screensaver/clear' class='btn clr'>&#x2715; REMOVE IMAGE</a></div>");
     }
-    html += F("<div class='box'><span class='lbl'>PICK FROM SD CARD</span>"
+    html += F("<div class='box'><span class='lbl'>SET SINGLE IMAGE FROM SD</span>"
               "<a href='/gallery' class='btn'>&#x1F4C2; BROWSE SD FILES &rarr;</a>"
-              "<p class='hint'>Open the SD gallery &mdash; tap &ldquo;SSAVER&rdquo; on any image to set it.</p></div>"
-              "<div class='box'><span class='lbl'>OR UPLOAD A JPG FROM DEVICE</span>"
+              "<p class='hint'>Tap &ldquo;SSAVER&rdquo; on any image to set it as Single Image mode.</p></div>"
+              "<div class='box'><span class='lbl'>UPLOAD JPG FROM DEVICE</span>"
               "<form method='POST' action='/screensaver' enctype='multipart/form-data'>"
               "<input type='file' name='img' accept='image/jpeg,.jpg,.jpeg' required>"
               "<button type='submit' class='btn'>&#x2B06; UPLOAD &amp; SET</button></form>"
-              "<p class='hint'>Open in Safari/Chrome (not the auto-popup). 320x240 px works best.</p>"
+              "<p class='hint'>Switches to Single Image mode. 320x240 px works best.</p>"
               "</div></body></html>");
     server.send(200, "text/html", html);
+}
+void handleSsaverSetMode() {
+    String m = server.arg("mode");
+    String c = server.arg("cycle");
+    uint8_t newMode = (uint8_t)m.toInt();
+    if (newMode > 4) newMode = 0;
+    ssaverMode = newMode;
+    ssaverImageShown = false;
+    mxReady = false;
+    sfReady = false;
+    plT = 0.0f;
+    sdCycleIdx = 0;
+    if (c.length()) {
+        int cv = c.toInt();
+        if (cv == 1 || cv == 5 || cv == 15 || cv == 30) sdCycleMins = (uint16_t)cv;
+    }
+    prefs.putUChar("ssMode", ssaverMode);
+    prefs.putUInt("sdCycleMins", (uint32_t)sdCycleMins);
+    server.sendHeader("Location", "/screensaver", true);
+    server.send(302, "text/plain", "");
 }
 void handleSsaverPost() {
     server.sendHeader("Location", "/screensaver", true);
@@ -5335,11 +5445,11 @@ void handleSsaverUpload() {
     } else if (upload.status == UPLOAD_FILE_WRITE) {
         if (ssaverUploadFile) ssaverUploadFile.write(upload.buf, upload.currentSize);
     } else if (upload.status == UPLOAD_FILE_END) {
-        if (ssaverUploadFile) { ssaverUploadFile.close(); ssaverImageActive = true; ssaverImageShown = false; }
+        if (ssaverUploadFile) { ssaverUploadFile.close(); ssaverMode = 3; ssaverImageShown = false; prefs.putUChar("ssMode", 3); }
     }
 }
 void handleSsaverClear() {
-    SD.remove("/ssaver.jpg"); ssaverImageActive = false; ssaverImageShown = false;
+    SD.remove("/ssaver.jpg"); ssaverMode = 0; ssaverImageShown = false; prefs.putUChar("ssMode", 0);
     server.sendHeader("Location", "/screensaver", true); server.send(302, "text/plain", "");
 }
 void handleSsaverPick() {
@@ -5355,7 +5465,7 @@ void handleSsaverPick() {
     if (in && out) {
         uint8_t buf[512]; int n;
         while ((n = in.read(buf, sizeof(buf))) > 0) out.write(buf, n);
-        out.close(); in.close(); ssaverImageActive = true; ssaverImageShown = false;
+        out.close(); in.close(); ssaverMode = 3; ssaverImageShown = false; prefs.putUChar("ssMode", 3);
     } else {
         if (in) in.close(); if (out) out.close();
         server.send(500, "text/plain", "Copy failed"); return;
@@ -5680,6 +5790,78 @@ static void updateLED() {
     digitalWrite(LED_R, HIGH);
 }
 
+// ── Starfield screensaver ─────────────────────────────────────────────────────
+#define SF_N 100
+struct SFStar { float x, y, z; int16_t px, py; };
+static SFStar sfStars[SF_N];
+
+static void sfInit() {
+    gfx->fillScreen(0x0000);
+    for (int i = 0; i < SF_N; i++) {
+        sfStars[i].x  = (random(0, 6400) - 3200) / 3200.0f;
+        sfStars[i].y  = (random(0, 4800) - 2400) / 2400.0f;
+        sfStars[i].z  = random(1, 1000) / 1000.0f;
+        sfStars[i].px = -1;
+        sfStars[i].py = -1;
+    }
+    sfReady = true;
+}
+
+static void drawStarfield() {
+    for (int i = 0; i < SF_N; i++) {
+        sfStars[i].z -= 0.005f;
+        if (sfStars[i].z <= 0.0f) {
+            sfStars[i].x  = (random(0, 6400) - 3200) / 3200.0f;
+            sfStars[i].y  = (random(0, 4800) - 2400) / 2400.0f;
+            sfStars[i].z  = 1.0f;
+            sfStars[i].px = -1; sfStars[i].py = -1;
+        }
+        int sx = (int)(160 + sfStars[i].x / sfStars[i].z * 160);
+        int sy = (int)(120 + sfStars[i].y / sfStars[i].z * 120);
+        if (sfStars[i].px >= 0) gfx->drawPixel(sfStars[i].px, sfStars[i].py, 0x0000);
+        if (sx >= 0 && sx < 320 && sy >= 0 && sy < 240) {
+            uint8_t bright = (uint8_t)((1.0f - sfStars[i].z) * 255);
+            gfx->drawPixel(sx, sy, gfx->color565(bright, bright, bright));
+            sfStars[i].px = sx; sfStars[i].py = sy;
+        } else {
+            sfStars[i].px = -1; sfStars[i].py = -1;
+        }
+    }
+}
+
+// ── Plasma screensaver ────────────────────────────────────────────────────────
+
+static uint16_t plasmaColor(float v) {
+    float h = v * 6.0f;
+    int   s = (int)h;
+    float f = h - s;
+    uint8_t r, g, b;
+    switch (s % 6) {
+        case 0: r=255; g=(uint8_t)(f*255); b=0;   break;
+        case 1: r=(uint8_t)((1-f)*255); g=255; b=0;   break;
+        case 2: r=0; g=255; b=(uint8_t)(f*255);   break;
+        case 3: r=0; g=(uint8_t)((1-f)*255); b=255; break;
+        case 4: r=(uint8_t)(f*255); g=0; b=255;   break;
+        default:r=255; g=0; b=(uint8_t)((1-f)*255); break;
+    }
+    return gfx->color565(r, g, b);
+}
+
+static void drawPlasma() {
+    for (int cy = 0; cy < 30; cy++) {
+        for (int cx = 0; cx < 40; cx++) {
+            float x = cx / 40.0f, y = cy / 30.0f;
+            float v = 0.5f + 0.5f * sinf(x * 6.0f + plT)
+                    + 0.5f + 0.5f * sinf(y * 6.0f + plT * 0.7f)
+                    + 0.5f + 0.5f * sinf((x + y) * 5.0f + plT * 1.3f);
+            v = fmodf(v / 3.0f, 1.0f);
+            gfx->fillRect(cx * 8, cy * 8, 8, 8, plasmaColor(v));
+        }
+    }
+    plT += 0.05f;
+    if (plT > 100.0f) plT = 0.0f;
+}
+
 // ── Matrix rain screensaver ───────────────────────────────────────────────────
 // 320×240 display, textSize 2 → 12×16 px per cell → 26 cols × 15 rows
 #define MX_COLS  26
@@ -5692,7 +5874,6 @@ static uint8_t mxLen [MX_COLS];
 static uint8_t mxSpd [MX_COLS];
 static uint8_t mxTick[MX_COLS];
 static char    mxChar[MX_COLS][MX_ROWS];
-static bool    mxReady = false;
 
 static char mxRandChar() {
     static const char pool[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%*+-=?";
@@ -5834,20 +6015,38 @@ static void updateDisplay() {
     if (clients == 0) {
         menuOpen = false;
         inScreensaver = true;
-        if (ssaverImageActive) {
-            if (!ssaverImageShown) { showSsaverImage(); ssaverImageShown = true; }
-        } else {
-            if (!mxReady) mxStart();
-            drawMatrixFrame();
+        switch (ssaverMode) {
+            case 1: // starfield
+                if (!sfReady) sfInit();
+                drawStarfield();
+                break;
+            case 2: // plasma
+                drawPlasma();
+                break;
+            case 3: // single picked/uploaded image
+                if (!ssaverImageShown) { showSsaverImage(); ssaverImageShown = true; }
+                break;
+            case 4: { // SD shuffle
+                unsigned long interval = (unsigned long)sdCycleMins * 60000UL;
+                if (!ssaverImageShown || (millis() - sdCycleLast >= interval))
+                    sdCycleAdvance();
+                break;
+            }
+            default: // 0 = matrix rain
+                if (!mxReady) mxStart();
+                drawMatrixFrame();
+                break;
         }
         return;
     }
 
-    // Exiting screensaver — clear matrix off the screen before redrawing idle
+    // Exiting screensaver — reset all screensaver state
     if (inScreensaver) {
         inScreensaver = false;
         ssaverImageShown = false;
         mxReady = false;
+        sfReady = false;
+        plT = 0.0f;
         gfx->fillScreen(0x0000);
     }
 
@@ -5939,7 +6138,10 @@ void setup() {
         // load password and screensaver state
         File pf = SD.open("/sdpass.txt");
         if (pf) { sdPassword = pf.readString(); sdPassword.trim(); pf.close(); }
-        ssaverImageActive = SD.exists("/ssaver.jpg");
+        ssaverMode  = (uint8_t)prefs.getUChar("ssMode", 0);
+        sdCycleMins = (uint16_t)prefs.getUInt("sdCycleMins", 5);
+        if (sdCycleMins != 1 && sdCycleMins != 5 && sdCycleMins != 15 && sdCycleMins != 30) sdCycleMins = 5;
+        if (ssaverMode == 3 && !SD.exists("/ssaver.jpg")) ssaverMode = 0;
     } else {
         gfx->setTextColor(0xF800);
         gfx->print("SD: NO CARD");
@@ -6076,6 +6278,7 @@ void setup() {
     server.on("/dl",               HTTP_GET,  handleFileDownload);
     server.on("/zip",              HTTP_GET,  handleZipDownload);
     server.on("/screensaver",      HTTP_GET,  handleSsaverGet);
+    server.on("/screensaver/setmode", HTTP_GET, handleSsaverSetMode);
     server.on("/screensaver",      HTTP_POST, handleSsaverPost,  handleSsaverUpload);
     server.on("/screensaver/clear",HTTP_GET,  handleSsaverClear);
     server.on("/screensaver/pick", HTTP_GET,  handleSsaverPick);
